@@ -144,6 +144,15 @@ ENV/
 env.bak/
 venv.bak/
 
+# Backend runtime data
+backend/uploads/
+backend/chroma_db/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
 # Spyder project settings
 .spyderproject
 .spyproject
