@@ -62,6 +62,7 @@ class ImageStore:
             height=image.height,
             description=analysis.description,
             objects=analysis.objects,
+            relations=analysis.relations,
             attributes=analysis.attributes
         )
 
@@ -80,6 +81,7 @@ class ImageStore:
                 "filepath": filepath,
                 "description": analysis.description,
                 "objects": json.dumps(analysis.objects),
+                "relations": json.dumps(analysis.relations),
                 "attributes": json.dumps(analysis.attributes),
                 "session_id": session_id,
                 "upload_time": datetime.utcnow().isoformat()
@@ -93,6 +95,19 @@ class ImageStore:
         logger.info(f"Stored analysis for image {image_id} in session {session_id}")
         return metadata
 
+    @staticmethod
+    def _metadata_from_chroma(doc_id: str, meta: dict) -> ImageMetadata:
+        return ImageMetadata(
+            image_id=doc_id,
+            filename=meta.get("filename", ""),
+            filepath=meta.get("filepath", ""),
+            upload_time=datetime.fromisoformat(meta["upload_time"]) if meta.get("upload_time") else datetime.utcnow(),
+            description=meta.get("description", ""),
+            objects=json.loads(meta.get("objects", "[]")),
+            relations=json.loads(meta.get("relations", "[]")),
+            attributes=json.loads(meta.get("attributes", "{}")),
+        )
+
     def store_correlations(self, correlations: list[CorrelationResult]):
         """Add new correlations to the store."""
         self._correlations.extend(correlations)
@@ -100,11 +115,55 @@ class ImageStore:
     def get_all_metadata(self, session_id: str = "default") -> list[ImageMetadata]:
         """Get all image metadata for a session."""
         image_ids = self._sessions.get(session_id, [])
-        return [self._metadata_cache[iid] for iid in image_ids if iid in self._metadata_cache]
+        cached = [self._metadata_cache[iid] for iid in image_ids if iid in self._metadata_cache]
+
+        if cached:
+            return cached
+
+        try:
+            results = self.collection.get(where={"session_id": session_id})
+        except Exception:
+            return []
+
+        metadata_list: list[ImageMetadata] = []
+        if results and results.get("ids"):
+            for index, doc_id in enumerate(results["ids"]):
+                raw_meta = results.get("metadatas", [])
+                if not raw_meta or index >= len(raw_meta):
+                    continue
+                meta = raw_meta[index] or {}
+                metadata = self._metadata_from_chroma(doc_id, meta)
+                metadata_list.append(metadata)
+                self._metadata_cache[doc_id] = metadata
+                if session_id not in self._sessions:
+                    self._sessions[session_id] = []
+                if doc_id not in self._sessions[session_id]:
+                    self._sessions[session_id].append(doc_id)
+
+        return metadata_list
 
     def get_metadata(self, image_id: str) -> ImageMetadata | None:
         """Get metadata for a single image."""
-        return self._metadata_cache.get(image_id)
+        metadata = self._metadata_cache.get(image_id)
+        if metadata:
+            return metadata
+
+        try:
+            results = self.collection.get(ids=[image_id])
+        except Exception:
+            return None
+
+        if not results or not results.get("ids"):
+            return None
+
+        doc_id = results["ids"][0]
+        meta_list = results.get("metadatas", [])
+        if not meta_list:
+            return None
+
+        metadata = self._metadata_from_chroma(doc_id, meta_list[0] or {})
+        self._metadata_cache[image_id] = metadata
+        return metadata
 
     def search_similar(self, query: str, n_results: int = 5, session_id: str = "default") -> list[dict]:
         """Search for images similar to a text query."""
@@ -137,6 +196,7 @@ class ImageStore:
                     "filename": meta.get("filename", ""),
                     "description": meta.get("description", ""),
                     "objects": json.loads(meta.get("objects", "[]")),
+                    "relations": json.loads(meta.get("relations", "[]")),
                     "attributes": json.loads(meta.get("attributes", "{}")),
                     "distance": results["distances"][0][i] if results["distances"] else 0
                 })

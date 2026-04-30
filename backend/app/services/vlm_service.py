@@ -75,14 +75,15 @@ class VLMService:
         ]
 
         try:
-            input_text = self.processor.apply_chat_template(
-                messages, add_generation_prompt=True
-            )
-            inputs = self.processor(
-                text=input_text,
-                images=[image],
+            inputs = self.processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
                 return_tensors="pt"
-            ).to(self.settings.device)
+            )
+
+            inputs = inputs.to(self.settings.device)
 
             with torch.no_grad():
                 outputs = self.model.generate(
@@ -91,11 +92,9 @@ class VLMService:
                     do_sample=False
                 )
 
-            decoded = self.processor.decode(outputs[0], skip_special_tokens=True)
-
-            # Extract only the generated portion (after the prompt)
-            if input_text in decoded:
-                decoded = decoded[len(input_text):].strip()
+            prompt_length = inputs["input_ids"].shape[-1]
+            generated_tokens = outputs[0][prompt_length:]
+            decoded = self.processor.decode(generated_tokens, skip_special_tokens=True).strip()
 
             return decoded
 
@@ -107,6 +106,7 @@ class VLMService:
         """Parse VLM raw text output into structured ImageAnalysis."""
         description = ""
         objects = []
+        relations = []
         attributes = {}
 
         lines = raw_output.split("\n")
@@ -121,6 +121,10 @@ class VLMService:
                 current_section = "objects"
                 obj_text = line.split(":", 1)[1].strip()
                 objects = [o.strip() for o in obj_text.split(",") if o.strip()]
+            elif line.upper().startswith("RELATIONS:"):
+                current_section = "relations"
+                rel_text = line.split(":", 1)[1].strip()
+                relations = [r.strip() for r in rel_text.split(",") if r.strip()]
             elif line.upper().startswith("ATTRIBUTES:"):
                 current_section = "attributes"
                 attr_text = line.split(":", 1)[1].strip()
@@ -132,6 +136,8 @@ class VLMService:
                 description += " " + line
             elif current_section == "objects" and line:
                 objects.extend([o.strip() for o in line.split(",") if o.strip()])
+            elif current_section == "relations" and line:
+                relations.extend([r.strip() for r in line.split(",") if r.strip()])
 
         # Fallback if parsing didn't yield structured data
         if not description:
@@ -143,6 +149,7 @@ class VLMService:
             image_id=image_id,
             description=description,
             objects=objects,
+            relations=relations,
             attributes=attributes,
             raw_vlm_output=raw_output
         )
