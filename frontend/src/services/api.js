@@ -18,12 +18,25 @@ export async function uploadImage(file, sessionId = 'default', onProgress) {
   formData.append('session_id', sessionId)
 
   const response = await api.post('/upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
     onUploadProgress: onProgress
       ? (e) => onProgress(Math.round((e.loaded * 100) / e.total))
       : undefined,
   })
   return response.data
+}
+
+export async function generateSceneGraph(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const response = await api.post('/v1/vision/visualize/scene-graph', formData, {
+    responseType: 'blob',
+  })
+
+  return {
+    blob: response.data,
+    nodeCount: response.headers?.['x-node-count'],
+  }
 }
 
 // ── Chat ──

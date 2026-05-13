@@ -1,14 +1,38 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import Sidebar from './Sidebar'
 import ImageUploader from './ImageUploader'
 import ImageGallery from './ImageGallery'
 import ChatInterface from './ChatInterface'
+import { getSessionImages } from '../services/api'
 
 export default function App() {
   const [sessionId] = useState('default')
   const [images, setImages] = useState([])
   const [correlations, setCorrelations] = useState([])
   const [activeTab, setActiveTab] = useState('chat') // 'chat' | 'gallery'
+
+  // Fetch existing images on component mount
+  useEffect(() => {
+    const fetchImages = async () => {
+      try {
+        const data = await getSessionImages(sessionId)
+        if (data && data.images) {
+          setImages(
+            data.images.map((img) => ({
+              ...img,
+              id: img.id || img.image_id,
+            }))
+          )
+          if (data.correlations) {
+            setCorrelations(data.correlations)
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fetch images:', error)
+      }
+    }
+    fetchImages()
+  }, [sessionId])
 
   const handleImageProcessed = useCallback((result) => {
     setImages((prev) => [
@@ -18,6 +42,8 @@ export default function App() {
         filename: result.filename,
         analysis: result.analysis,
         correlations: result.correlations || [],
+        sceneGraphUrl: result.sceneGraphUrl || '',
+        sceneGraphNodeCount: result.sceneGraphNodeCount || 0,
       },
     ])
     // Merge new correlations

@@ -10,11 +10,12 @@ from pathlib import Path
 from datetime import datetime
 from PIL import Image
 
-from app.config import get_settings
-from app.models.schemas import ImageMetadata, ImageAnalysis, CorrelationResult
-from app.models.database import get_collection
-from app.services.cohere_service import get_cohere_service
-from app.utils.image_processing import load_image
+from ..config import get_settings
+from ..models.schemas import ImageMetadata, ImageAnalysis, CorrelationResult
+from ..models.database import get_collection, get_chroma_client
+from .cohere_service import get_cohere_service
+from ..utils.image_processing import load_image
+from chromadb.errors import InvalidArgumentError
 
 logger = logging.getLogger(__name__)
 
@@ -69,22 +70,57 @@ class ImageStore:
         embed_text = f"{analysis.description} Objects: {', '.join(analysis.objects)}"
         embedding = self.cohere.generate_embedding(embed_text)
 
-        # Store in ChromaDB
-        self.collection.upsert(
-            ids=[image_id],
-            embeddings=[embedding],
-            documents=[embed_text],
-            metadatas=[{
-                "image_id": image_id,
-                "filename": filename,
-                "filepath": filepath,
-                "description": analysis.description,
-                "objects": json.dumps(analysis.objects),
-                "attributes": json.dumps(analysis.attributes),
-                "session_id": session_id,
-                "upload_time": datetime.utcnow().isoformat()
-            }]
-        )
+        # Store in ChromaDB, with recovery if collection dimension mismatches
+        try:
+            self.collection.upsert(
+                ids=[image_id],
+                embeddings=[embedding],
+                documents=[embed_text],
+                metadatas=[{
+                    "image_id": image_id,
+                    "filename": filename,
+                    "filepath": filepath,
+                    "description": analysis.description,
+                    "objects": json.dumps(analysis.objects),
+                    "attributes": json.dumps(analysis.attributes),
+                    "session_id": session_id,
+                    "upload_time": datetime.utcnow().isoformat()
+                }]
+            )
+        except InvalidArgumentError as e:
+            logger.warning(
+                "ChromaDB embedding dimension mismatch detected: %s. Attempting to recreate collection.",
+                e
+            )
+            try:
+                client = get_chroma_client()
+                # Delete and recreate collection to accept new embedding dimension
+                client.delete_collection("image_analysis")
+            except Exception as de:
+                logger.error("Failed to delete Chroma collection: %s", de)
+            try:
+                self.collection = client.get_or_create_collection(
+                    name="image_analysis",
+                    metadata={"description": "Vision RAG image analysis embeddings"}
+                )
+                # Retry upsert once
+                self.collection.upsert(
+                    ids=[image_id],
+                    embeddings=[embedding],
+                    documents=[embed_text],
+                    metadatas=[{
+                        "image_id": image_id,
+                        "filename": filename,
+                        "filepath": filepath,
+                        "description": analysis.description,
+                        "objects": json.dumps(analysis.objects),
+                        "attributes": json.dumps(analysis.attributes),
+                        "session_id": session_id,
+                        "upload_time": datetime.utcnow().isoformat()
+                    }]
+                )
+            except Exception as re:
+                logger.error("Failed to recreate Chroma collection and upsert: %s", re)
 
         # Update caches
         self._metadata_cache[image_id] = metadata
@@ -119,6 +155,18 @@ class ImageStore:
                 n_results=min(n_results, self.collection.count()),
                 where=where_filter if self.collection.count() > 0 else None
             )
+        except InvalidArgumentError as e:
+            logger.warning("ChromaDB embedding dimension mismatch on query: %s. Recreating collection.", e)
+            try:
+                client = get_chroma_client()
+                client.delete_collection("image_analysis")
+                self.collection = client.get_or_create_collection(
+                    name="image_analysis",
+                    metadata={"description": "Vision RAG image analysis embeddings"}
+                )
+            except Exception as de:
+                logger.error("Failed to recreate Chroma collection after query error: %s", de)
+            return []
         except Exception:
             # Fallback without filter
             if self.collection.count() == 0:

@@ -9,15 +9,15 @@ This is the single entry point for both upload and chat operations.
 import logging
 from PIL import Image
 
-from app.models.schemas import (
+from ..models.schemas import (
     ImageAnalysis, CorrelationResult, UploadResponse,
     ChatRequest, ChatResponse, ChatMessage, MessageRole
 )
-from app.services.vlm_service import get_vlm_service
-from app.services.correlation_service import get_correlation_service
-from app.services.cohere_service import get_cohere_service
-from app.services.image_store import get_image_store
-from app.utils.prompt_templates import build_image_context
+from .vlm_service import get_vlm_service
+from .correlation_service import get_correlation_service
+from .cohere_service import get_cohere_service
+from .image_store import get_image_store
+from ..utils.prompt_templates import build_image_context
 
 logger = logging.getLogger(__name__)
 

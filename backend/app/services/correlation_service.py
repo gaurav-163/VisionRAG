@@ -6,8 +6,8 @@ Uses VLM for pairwise comparison + simple object overlap scoring.
 import logging
 from itertools import combinations
 
-from app.models.schemas import ImageAnalysis, CorrelationResult, ImageMetadata
-from app.utils.prompt_templates import correlation_prompt
+from ..models.schemas import ImageAnalysis, CorrelationResult, ImageMetadata
+from ..utils.prompt_templates import correlation_prompt
 
 logger = logging.getLogger(__name__)
 

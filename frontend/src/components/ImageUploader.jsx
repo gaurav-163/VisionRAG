@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react'
 import { Upload, Loader2, CheckCircle, AlertCircle } from 'lucide-react'
-import { uploadImage } from '../services/api'
+import { uploadImage, generateSceneGraph } from '../services/api'
 
 export default function ImageUploader({ sessionId, onImageProcessed }) {
   const [status, setStatus] = useState('idle') // idle | uploading | analyzing | done | error
@@ -22,8 +22,16 @@ export default function ImageUploader({ sessionId, onImageProcessed }) {
           if (pct >= 100) setStatus('analyzing')
         })
 
+        setStatus('analyzing')
+        const sceneGraph = await generateSceneGraph(file)
+        const sceneGraphUrl = URL.createObjectURL(sceneGraph.blob)
+
         setStatus('done')
-        onImageProcessed(result)
+        onImageProcessed({
+          ...result,
+          sceneGraphUrl,
+          sceneGraphNodeCount: sceneGraph.nodeCount,
+        })
 
         // Reset after 2s
         setTimeout(() => setStatus('idle'), 2000)

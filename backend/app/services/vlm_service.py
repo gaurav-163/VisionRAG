@@ -1,4 +1,5 @@
 """
+
 Vision Language Model service — wraps SmolVLM2 for image analysis.
 Handles model loading, inference, and output parsing.
 """
@@ -9,10 +10,10 @@ from PIL import Image
 from transformers import AutoProcessor, AutoModelForImageTextToText
 from functools import lru_cache
 
-from app.config import get_settings
-from app.models.schemas import ImageAnalysis
-from app.utils.image_processing import prepare_image_for_vlm
-from app.utils.prompt_templates import image_analysis_prompt
+from ..config import get_settings
+from ..models.schemas import ImageAnalysis
+from ..utils.image_processing import prepare_image_for_vlm
+from ..utils.prompt_templates import image_analysis_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class VLMService:
             )
             self.model = AutoModelForImageTextToText.from_pretrained(
                 self.settings.vlm_model_name,
-                torch_dtype=torch.float32,
+                dtype=torch.float32,
                 trust_remote_code=True
             ).to(self.settings.device)
             self.model.eval()
@@ -134,7 +135,11 @@ class VLMService:
                 objects.extend([o.strip() for o in line.split(",") if o.strip()])
 
         # Fallback if parsing didn't yield structured data
-        if not description:
+        # If the model returned template placeholders (e.g. '<detailed description>'),
+        # treat them as empty so fallback will use the raw output instead.
+        placeholders = ["<detailed description>", "<comma-separated list of objects>", "<key details about the scene>", "<contextual information>"]
+        desc_is_placeholder = any(p in description.lower() for p in [ph.lower() for ph in placeholders])
+        if not description or desc_is_placeholder:
             description = raw_output[:500]
         if not objects:
             objects = self._extract_objects_fallback(raw_output)

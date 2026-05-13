@@ -1,35 +1,14 @@
-# Vision RAG — Image Analysis & Correlation Chat
+# VisionRAG
 
-Upload images → SmolVLM2 analyzes objects & scenes → Correlations computed →
-Ask questions via Cohere-powered RAG chat.
+Company-style mono-repo layout:
 
-## Architecture
+- `backend/` FastAPI service
+- `frontend/` web client
 
-## Quick Start
+## Run locally
 
-### 1. Environment Setup
-
-```bash
-cp backend/.env.example backend/.env
-# Add your COHERE_API_KEY to backend/.env
-
-## Docker (Recommended)
-```
-docker-compose up --build
-# Frontend: http://localhost:5173
-# Backend:  http://localhost:8000/docs
-```
-## Local Development
-```
-cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
-## Frontend
-```
-cd frontend
-npm install
-npm run dev
+```powershell
+cd G:\VisionRAG\backend
+& "G:\Python 3.11\Scripts\python.exe" -m pip install -r requirements.txt
+& "G:\Python 3.11\Scripts\python.exe" -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```

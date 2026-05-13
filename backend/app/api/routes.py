@@ -7,10 +7,10 @@ from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from PIL import Image
 import io
 
-from app.models.schemas import UploadResponse, ChatRequest, ChatResponse, SessionInfo
-from app.services.rag_pipeline import RAGPipeline
-from app.api.dependencies import get_pipeline
-from app.config import get_settings
+from ..models.schemas import UploadResponse, ChatRequest, ChatResponse, SessionInfo
+from ..services.rag_pipeline import RAGPipeline
+from .dependencies import get_pipeline
+from ..config import get_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

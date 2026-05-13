@@ -4,7 +4,7 @@ ChromaDB vector store — single collection for image embeddings and metadata.
 
 import chromadb
 from functools import lru_cache
-from app.config import get_settings
+from ..config import get_settings
 
 
 @lru_cache()

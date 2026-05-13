@@ -9,7 +9,7 @@ from pathlib import Path
 
 class Settings(BaseSettings):
     # API Keys
-    cohere_api_key: str
+    cohere_api_key: str = ""
 
     # Model
     vlm_model_name: str = "HuggingFaceTB/SmolVLM2-256M-Video-Instruct"
@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     class Config:
-        env_file = ".env"
+        env_file = str(Path(__file__).resolve().parent.parent / ".env")
         env_file_encoding = "utf-8"
 
     @property
