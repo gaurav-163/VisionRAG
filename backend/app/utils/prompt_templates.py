@@ -62,11 +62,19 @@ def build_image_context(analyses: list[dict]) -> str:
     parts = []
 
     for analysis in analyses:
+        object_counts = analysis.get("object_counts", {})
+        if object_counts:
+            counts_text = ", ".join(f"{name}: {count}" for name, count in object_counts.items())
+        else:
+            counts_text = "none"
+
         parts.append(
             f"[Image {analysis['image_id']}]\n"
             f"File: {analysis.get('filename', 'unknown')}\n"
             f"Description: {analysis['description']}\n"
             f"Objects: {', '.join(analysis.get('objects', []))}\n"
+            f"Object Counts: {counts_text}\n"
+            f"People Count: {analysis.get('people_count', 'unknown')}\n"
             f"Relations: {', '.join(analysis.get('relations', []))}\n"
             f"Attributes: {analysis.get('attributes', {})}\n"
         )

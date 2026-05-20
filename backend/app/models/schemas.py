@@ -24,6 +24,9 @@ class ImageMetadata(BaseModel):
     height: int | None = None
     description: str = ""
     objects: list[str] = Field(default_factory=list)
+    object_counts: dict[str, int] = Field(default_factory=dict)
+    people_count: int | None = None
+    annotated_image_path: str | None = None
     relations: list[str] = Field(default_factory=list)
     attributes: dict = Field(default_factory=dict)
     correlations: list[dict] = Field(default_factory=list)
@@ -33,7 +36,9 @@ class ImageAnalysis(BaseModel):
     image_id: str
     description: str
     objects: list[str]
+    object_counts: dict[str, int] = Field(default_factory=dict)
     people_count: int | None = None
+    annotated_image_path: str | None = None
     relations: list[str] = Field(default_factory=list)
     attributes: dict
     raw_vlm_output: str

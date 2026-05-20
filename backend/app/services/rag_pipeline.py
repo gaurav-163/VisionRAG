@@ -68,6 +68,9 @@ class RAGPipeline:
         metadata = self.store.get_metadata(image_id)
         if metadata:
             metadata.correlations = []
+            metadata.object_counts = analysis.object_counts
+            metadata.people_count = analysis.people_count
+            metadata.annotated_image_path = analysis.annotated_image_path
 
         return UploadResponse(
             image_id=image_id,
@@ -107,6 +110,9 @@ class RAGPipeline:
                 "filename": analysis.filename,
                 "description": analysis.description,
                 "objects": analysis.objects,
+                "object_counts": analysis.object_counts,
+                "people_count": analysis.people_count,
+                "annotated_image_path": analysis.annotated_image_path,
                 "relations": analysis.relations,
                 "attributes": analysis.attributes,
             }
