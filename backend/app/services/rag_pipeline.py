@@ -64,24 +64,17 @@ class RAGPipeline:
             session_id=session_id
         )
 
-        # Step 4: Compute correlations with existing images
-        existing = self.store.get_all_metadata(session_id)
-        correlations = self.correlator.compute_all_correlations(analysis, existing)
-        self.store.store_correlations(correlations)
-        logger.info(f"[Pipeline] Found {len(correlations)} correlations for {image_id}")
-
-        # Step 5: Update metadata with correlations
+        # Step 4: Keep the analyzed image metadata available for chat.
         metadata = self.store.get_metadata(image_id)
         if metadata:
-            metadata.correlations = [c.model_dump() for c in correlations[:5]]
+            metadata.correlations = []
 
         return UploadResponse(
             image_id=image_id,
             filename=filename,
             analysis=analysis,
-            correlations=correlations[:5],
-            message=f"Image analyzed: {len(analysis.objects)} objects found, "
-                    f"{len(correlations)} correlations detected"
+            correlations=[],
+            message=f"Image analyzed: {len(analysis.objects)} objects found"
         )
 
     # ── Chat Pipeline ──
@@ -100,41 +93,59 @@ class RAGPipeline:
             session_id=session_id
         )
 
-        # Step 2: Get relevant correlations
-        all_correlations = self.store.get_all_correlations(session_id)
-        relevant_correlations = self.correlator.find_relevant_correlations(
-            user_message, all_correlations
-        )
+        # Always include the analyzed images from the current session so direct
+        # questions about an uploaded image are answered from the image data
+        # even when semantic search misses the best match.
+        session_analyses = self.store.get_all_metadata(session_id)
 
-        # Step 3: Build context
-        context = build_image_context(
-            analyses=search_results,
-            correlations=[c.model_dump() for c in relevant_correlations]
-        )
+        analyses_by_id: dict[str, dict] = {}
+        for analysis in search_results:
+            analyses_by_id[analysis["image_id"]] = analysis
+        for analysis in session_analyses:
+            analyses_by_id[analysis.image_id] = {
+                "image_id": analysis.image_id,
+                "filename": analysis.filename,
+                "description": analysis.description,
+                "objects": analysis.objects,
+                "relations": analysis.relations,
+                "attributes": analysis.attributes,
+            }
 
-        # Step 4: Get chat history
+        analyses_for_context = list(analyses_by_id.values())
+
+        if not analyses_for_context:
+            answer = (
+                "I do not have any analyzed images in this session yet. "
+                "Upload an image first, then ask me what is in it."
+            )
+            return ChatResponse(answer=answer, referenced_images=[], correlations_used=[])
+
+        # Step 2: Build context from the uploaded image analyses only.
+        context = build_image_context(analyses=analyses_for_context)
+
+        # Step 3: Get chat history
         history = self._chat_histories.get(session_id, [])
 
-        # Step 5: Generate response with Cohere
+        # Step 4: Generate response with Cohere
         answer = self.cohere.generate_response(
             user_message=user_message,
             context=context,
             chat_history=history
         )
 
-        # Step 6: Update chat history
+        # Step 5: Update chat history
         self._chat_histories.setdefault(session_id, []).extend([
             {"role": "user", "content": user_message},
             {"role": "assistant", "content": answer}
         ])
 
-        # Step 7: Build response
-        referenced_images = [r["image_id"] for r in search_results]
+        # Step 6: Build response
+        referenced_images = [r["image_id"] for r in analyses_for_context]
 
         return ChatResponse(
             answer=answer,
             referenced_images=referenced_images,
-            correlations_used=relevant_correlations[:3]
+            correlations_used=[]
         )
 
     def get_session_info(self, session_id: str = "default") -> dict:

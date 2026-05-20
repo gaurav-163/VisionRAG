@@ -1,7 +1,10 @@
 import React from 'react'
 import { Link2, Tag, FileText } from 'lucide-react'
+import AnalysisDiagram from './AnalysisDiagram'
 
 export default function ImageGallery({ images, correlations }) {
+  const [expandedImage, setExpandedImage] = React.useState(null)
+
   if (images.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-gray-500">
@@ -18,69 +21,83 @@ export default function ImageGallery({ images, correlations }) {
       {/* Image Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mb-8">
         {images.map((img) => (
-          <div
-            key={img.id}
-            className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden hover:border-gray-700 transition-colors"
-          >
-            {/* Image preview */}
-            <div className="h-48 bg-gray-800 flex items-center justify-center overflow-hidden">
-              <img
-                src={`/uploads/${img.id}${getExtension(img.filename)}`}
-                alt={img.filename}
-                className="w-full h-full object-cover"
-                onError={(e) => {
-                  e.target.style.display = 'none'
-                  e.target.parentElement.innerHTML = `
-                    <div class="flex flex-col items-center text-gray-600">
-                      <span class="text-3xl mb-1">🖼️</span>
-                      <span class="text-xs">${img.filename}</span>
-                    </div>
-                  `
-                }}
-              />
-            </div>
-
-            {/* Info */}
-            <div className="p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-medium text-white truncate">
-                  {img.filename}
-                </h3>
-                <span className="text-xs text-gray-500 font-mono">{img.id}</span>
+          <div key={img.id}>
+            <div
+              onClick={() => setExpandedImage(expandedImage === img.id ? null : img.id)}
+              className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden hover:border-gray-700 transition-colors cursor-pointer"
+            >
+              {/* Image preview */}
+              <div className="h-48 bg-gray-800 flex items-center justify-center overflow-hidden">
+                <img
+                  src={`/uploads/${img.id}${getExtension(img.filename)}`}
+                  alt={img.filename}
+                  className="w-full h-full object-cover"
+                  onError={(e) => {
+                    e.target.style.display = 'none'
+                    e.target.parentElement.innerHTML = `
+                      <div class="flex flex-col items-center text-gray-600">
+                        <span class="text-3xl mb-1">🖼️</span>
+                        <span class="text-xs">${img.filename}</span>
+                      </div>
+                    `
+                  }}
+                />
               </div>
 
-              {/* Description */}
-              {img.analysis?.description && (
-                <div className="flex gap-2 text-xs">
-                  <FileText size={12} className="text-gray-500 flex-shrink-0 mt-0.5" />
-                  <p className="text-gray-400 line-clamp-3">
-                    {img.analysis.description}
-                  </p>
+              {/* Info */}
+              <div className="p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-white truncate">
+                    {img.filename}
+                  </h3>
+                  <span className="text-xs text-gray-500 font-mono">{img.id}</span>
                 </div>
-              )}
 
-              {/* Objects */}
-              {img.analysis?.objects?.length > 0 && (
-                <div className="flex gap-2 items-start">
-                  <Tag size={12} className="text-gray-500 flex-shrink-0 mt-1" />
-                  <div className="flex flex-wrap gap-1">
-                    {img.analysis.objects.slice(0, 8).map((obj, i) => (
-                      <span
-                        key={i}
-                        className="px-2 py-0.5 bg-gray-800 text-gray-400 text-xs rounded-md"
-                      >
-                        {obj}
-                      </span>
-                    ))}
-                    {img.analysis.objects.length > 8 && (
-                      <span className="text-xs text-gray-600">
-                        +{img.analysis.objects.length - 8} more
-                      </span>
-                    )}
+                {/* Description */}
+                {img.analysis?.description && (
+                  <div className="flex gap-2 text-xs">
+                    <FileText size={12} className="text-gray-500 flex-shrink-0 mt-0.5" />
+                    <p className="text-gray-400 line-clamp-3">
+                      {img.analysis.description}
+                    </p>
                   </div>
-                </div>
-              )}
+                )}
+
+                {/* Objects */}
+                {img.analysis?.objects?.length > 0 && (
+                  <div className="flex gap-2 items-start">
+                    <Tag size={12} className="text-gray-500 flex-shrink-0 mt-1" />
+                    <div className="flex flex-wrap gap-1">
+                      {img.analysis.objects.slice(0, 8).map((obj, i) => (
+                        <span
+                          key={i}
+                          className="px-2 py-0.5 bg-gray-800 text-gray-400 text-xs rounded-md"
+                        >
+                          {obj}
+                        </span>
+                      ))}
+                      {img.analysis.objects.length > 8 && (
+                        <span className="text-xs text-gray-600">
+                          +{img.analysis.objects.length - 8} more
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Click hint */}
+                <p className="text-xs text-gray-600">
+                  Click to {expandedImage === img.id ? 'collapse' : 'view'} analysis diagram
+                </p>
+              </div>
             </div>
+
+            {/* Expanded Analysis Diagram */}
+            {expandedImage === img.id && img.analysis && (
+              <div className="mt-4 bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                <AnalysisDiagram analysis={img.analysis} filename={img.filename} />
+              </div>
+            )}
           </div>
         ))}
       </div>
