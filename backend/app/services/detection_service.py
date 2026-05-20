@@ -34,63 +34,41 @@ class DetectionService:
         self._initialized = True
         self.settings = get_settings()
         self.model_name = "yolov8n.pt"
-        self.conf_threshold = 0.25
+        # Use a stricter confidence threshold for production-ready annotations
+        self.conf_threshold = 0.5
+        # IoU threshold used for NMS to reduce duplicate/overlapping detections
+        self.iou_threshold = 0.45
         self.max_image_side = 960
         self.model = None
         self.annotations_dir = Path(self.settings.upload_dir) / "annotated"
         self.annotations_dir.mkdir(parents=True, exist_ok=True)
+    def _save_plotted_annotations(self, result, image_id: str) -> str | None:
+        """Use YOLO's built-in plotting to render clean annotations and save image.
 
-    def _draw_and_save_annotations(self, image: Image.Image, detections: list[dict], image_id: str) -> str:
-        """Draw bounding boxes on image and save to annotations folder."""
+        This relies on `result.plot()` which produces a numpy image with plotted
+        boxes and labels. We convert to RGB and save as JPEG to the annotations
+        directory so the frontend can serve it from `/uploads/annotated/`.
+        """
         try:
-            annotated = image.copy()
-            draw = ImageDraw.Draw(annotated)
+            plotted = result.plot()  # numpy array (H, W, 3), typically BGR
+            if plotted is None:
+                return None
 
-            # Color palette for different classes
-            colors = [
-                "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8",
-                "#F7DC6F", "#BB8FCE", "#85C1E2", "#F8B88B", "#ABEBC6",
-            ]
+            # Convert BGR -> RGB if necessary by reversing channels
+            try:
+                # sometimes plot already returns RGB, but reversing is safe
+                rgb = plotted[..., ::-1]
+            except Exception:
+                rgb = plotted
 
-            class_to_color = {}
-            color_idx = 0
+            annotated_img = Image.fromarray(rgb)
 
-            for detection in detections:
-                box = detection["box"]
-                class_name = detection["class_name"]
-                confidence = detection["confidence"]
-
-                if class_name not in class_to_color:
-                    class_to_color[class_name] = colors[color_idx % len(colors)]
-                    color_idx += 1
-
-                color = class_to_color[class_name]
-                x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
-
-                # Draw rectangle
-                draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-
-                # Draw label with background
-                label = f"{class_name} {confidence:.2f}"
-                text_bbox = draw.textbbox((x1, y1), label)
-                text_width = text_bbox[2] - text_bbox[0] + 4
-                text_height = text_bbox[3] - text_bbox[1] + 2
-
-                draw.rectangle(
-                    [x1, max(0, y1 - text_height - 2), x1 + text_width, y1],
-                    fill=color,
-                )
-                draw.text((x1 + 2, max(0, y1 - text_height)), label, fill="white")
-
-            # Save annotated image
             output_filename = f"{image_id}_annotated.jpg"
             output_path = self.annotations_dir / output_filename
-            annotated.save(output_path, quality=90)
-
-            # Return relative URL path for API response
+            annotated_img.save(output_path, quality=90)
             return f"/uploads/annotated/{output_filename}"
         except Exception as exc:
-            logger.warning(f"Failed to draw annotations: {exc}")
+            logger.warning(f"Failed to save plotted annotations: {exc}")
             return None
 
     def _load_model(self) -> None:
@@ -124,6 +102,7 @@ class DetectionService:
             results = self.model.predict(
                 source=image_array,
                 conf=self.conf_threshold,
+                iou=self.iou_threshold,
                 imgsz=640,
                 device=self.settings.device,
                 verbose=False,
@@ -132,6 +111,7 @@ class DetectionService:
             results = self.model.predict(
                 source=image_array,
                 conf=self.conf_threshold,
+                iou=self.iou_threshold,
                 imgsz=640,
                 verbose=False,
             )
@@ -148,6 +128,10 @@ class DetectionService:
         counts = Counter()
         detections: list[dict] = []
 
+        # Collect detections while enforcing confidence filtering and
+        # preparing metadata for downstream components. Using the model-level
+        # `conf` and `iou` parameters already reduces low-confidence and
+        # duplicate boxes; we still apply a final per-box confidence filter.
         for box in boxes:
             confidence = float(box.conf.item()) if getattr(box, "conf", None) is not None else 0.0
             if confidence < self.conf_threshold:
@@ -164,6 +148,7 @@ class DetectionService:
             class_name = class_name.strip()
             counts[class_name] += 1
 
+            # box.xyxy may be a tensor-like object
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             detections.append(
                 {
@@ -180,8 +165,14 @@ class DetectionService:
             )
 
         annotated_image_path = None
+        # Save plotted annotations using YOLO's internal plotting (better
+        # handling of crowded scenes, label placement and readability).
         if image_id and detections:
-            annotated_image_path = self._draw_and_save_annotations(image, detections, image_id)
+            try:
+                annotated_image_path = self._save_plotted_annotations(result, image_id)
+            except Exception:
+                # Fallback: if plotting fails, don't block detection result
+                annotated_image_path = None
 
         return {
             "counts": dict(counts),
