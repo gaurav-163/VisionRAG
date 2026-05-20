@@ -8,6 +8,7 @@ dependencies = [
     "fastapi==0.115.6",
     "num2words==0.5.12",
     "numpy==1.26.4",
+    "opencv-python-headless==4.11.0.86",
     "pillow==11.1.0",
     "pydantic==2.10.4",
     "pydantic-settings==2.7.1",

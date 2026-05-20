@@ -33,6 +33,7 @@ class ImageAnalysis(BaseModel):
     image_id: str
     description: str
     objects: list[str]
+    people_count: int | None = None
     relations: list[str] = Field(default_factory=list)
     attributes: dict
     raw_vlm_output: str

@@ -13,4 +13,5 @@ python-dotenv==1.0.1
 uuid6==2024.7.10
 numpy==1.26.4
 num2words==0.5.12
+opencv-python-headless==4.11.0.86
 
