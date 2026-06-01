@@ -20,4 +20,5 @@ dependencies = [
     "uuid6==2024.7.10",
     "uvicorn==0.34.0",
     "ultralytics==8.3.137",
+    "ruff>=0.15.14",
 ]

@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 from ultralytics import YOLO
 
 from app.config import get_settings
+from app.utils.object_normalization import normalize_object_counts
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ class DetectionService:
                 annotated_image_path = None
 
         return {
-            "counts": dict(counts),
+            "counts": normalize_object_counts(dict(counts)),
             "detections": detections,
             "annotated_image_path": annotated_image_path,
         }

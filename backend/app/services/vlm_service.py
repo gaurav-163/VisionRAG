@@ -1,22 +1,125 @@
 """
 Vision Language Model service — wraps SmolVLM2 for image analysis.
-Handles model loading, inference, and output parsing.
+Detector-first pipeline: YOLO provides authoritative people counts and primary object signals,
+while the VLM is used for scene description, relationships, and human activity reasoning.
 """
 
-import torch
-import logging
-from PIL import Image
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from __future__ import annotations
+
+from collections import Counter
 from functools import lru_cache
+import logging
 import re
+
+import torch
+from PIL import Image
+from transformers import AutoModelForImageTextToText, AutoProcessor
 
 from app.config import get_settings
 from app.models.schemas import ImageAnalysis
 from app.services.detection_service import get_detection_service
 from app.utils.image_processing import prepare_image_for_vlm
+from app.utils.object_normalization import HUMAN_LABELS, normalize_object_counts
 from app.utils.prompt_templates import image_analysis_prompt
 
 logger = logging.getLogger(__name__)
+
+PERSON_REGEX = re.compile(r"\b(person|people|man|woman|boy|girl|human|worker|staff)\b", re.IGNORECASE)
+COUNT_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+COUNT_PATTERNS = (
+    re.compile(r"\b(?:count|total|people|person|humans?|workers?|staff)\D{0,12}(\d+)\b", re.IGNORECASE),
+    re.compile(r"\b(\d+)\D{0,12}(?:people|persons?|humans?|workers?|staff)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(one|two|three|four|five|six|seven|eight|nine|ten)\D{0,12}(?:people|persons?|humans?|workers?|staff)\b",
+        re.IGNORECASE,
+    ),
+)
+
+SECTION_HEADERS = {
+    "description": re.compile(r"^DESCRIPTION:\s*(.*)$", re.IGNORECASE),
+    "visible_people": re.compile(r"^VISIBLE_PEOPLE:\s*(.*)$", re.IGNORECASE),
+    "objects": re.compile(r"^OBJECTS:\s*(.*)$", re.IGNORECASE),
+    "relations": re.compile(r"^RELATIONS:\s*(.*)$", re.IGNORECASE),
+    "attributes": re.compile(r"^ATTRIBUTES:\s*(.*)$", re.IGNORECASE),
+}
+
+FALLBACK_OBJECT_LABELS = (
+    "person",
+    "chair",
+    "table",
+    "desk",
+    "bench",
+    "sofa",
+    "couch",
+    "bed",
+    "car",
+    "truck",
+    "bus",
+    "van",
+    "motorcycle",
+    "bicycle",
+    "train",
+    "plane",
+    "boat",
+    "door",
+    "window",
+    "wall",
+    "floor",
+    "ceiling",
+    "road",
+    "street",
+    "sidewalk",
+    "building",
+    "house",
+    "office",
+    "store",
+    "shop",
+    "tree",
+    "plant",
+    "grass",
+    "sign",
+    "screen",
+    "monitor",
+    "phone",
+    "laptop",
+    "computer",
+    "keyboard",
+    "camera",
+    "book",
+    "bag",
+    "backpack",
+    "bottle",
+    "cup",
+    "glass",
+    "plate",
+    "bowl",
+    "box",
+    "package",
+    "helmet",
+    "hat",
+    "shirt",
+    "jacket",
+    "shoe",
+    "vehicle",
+)
+
+OBJECT_EXTRACTION_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(label) for label in sorted(set(FALLBACK_OBJECT_LABELS), key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
 
 
 class VLMService:
@@ -40,40 +143,50 @@ class VLMService:
         self.detector = get_detection_service()
         self._load_model()
 
-    def _load_model(self):
-        """Load VLM model and processor."""
-        logger.info(f"Loading VLM model: {self.settings.vlm_model_name}")
+    def _load_model(self) -> None:
+        """Load VLM model and processor with device-aware dtype selection."""
+        logger.info("Loading VLM model: %s", self.settings.vlm_model_name)
+        dtype = torch.float16 if "cuda" in str(self.settings.device).lower() else torch.float32
+
         try:
             self.processor = AutoProcessor.from_pretrained(
                 self.settings.vlm_model_name,
-                trust_remote_code=True
+                trust_remote_code=True,
             )
             self.model = AutoModelForImageTextToText.from_pretrained(
                 self.settings.vlm_model_name,
-                torch_dtype=torch.float32,
-                trust_remote_code=True
+                torch_dtype=dtype,
+                trust_remote_code=True,
             ).to(self.settings.device)
             self.model.eval()
             logger.info("VLM model loaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to load VLM model: {e}")
+        except Exception as exc:
+            logger.error("Failed to load VLM model: %s", exc)
             raise
 
     def analyze_image(self, image: Image.Image, image_id: str) -> ImageAnalysis:
-        """Run VLM inference on a single image and parse the output."""
+        """Run detector-first analysis and parse the VLM output into structured data."""
+        detection_result = self._safe_detect(image, image_id)
         processed_image = prepare_image_for_vlm(image)
         raw_output = self._run_inference(processed_image, image_analysis_prompt())
-        return self._parse_analysis(raw_output, image, image_id)
+        return self._parse_analysis(raw_output, image_id, detection_result)
+
+    def _safe_detect(self, image: Image.Image, image_id: str) -> dict:
+        try:
+            return self.detector.detect_objects(image, image_id)
+        except Exception as exc:
+            logger.warning("YOLO detection failed, falling back to VLM parsing: %s", exc)
+            return {"counts": {}, "detections": [], "annotated_image_path": None}
 
     def _run_inference(self, image: Image.Image, prompt: str) -> str:
-        """Core inference method — reused for any VLM query."""
+        """Core inference method used for image understanding queries."""
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": prompt}
-                ]
+                    {"type": "text", "text": prompt},
+                ],
             }
         ]
 
@@ -83,408 +196,284 @@ class VLMService:
                 add_generation_prompt=True,
                 tokenize=True,
                 return_dict=True,
-                return_tensors="pt"
+                return_tensors="pt",
             )
-
             inputs = inputs.to(self.settings.device)
 
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=512,
-                    do_sample=False
+                    max_new_tokens=256,
+                    do_sample=False,
+                    num_beams=1,
+                    use_cache=True,
                 )
 
             prompt_length = inputs["input_ids"].shape[-1]
             generated_tokens = outputs[0][prompt_length:]
-            decoded = self.processor.decode(generated_tokens, skip_special_tokens=True).strip()
-
-            return decoded
-
-        except Exception as e:
-            logger.error(f"VLM inference failed: {e}")
-            return f"Analysis failed: {str(e)}"
-
-    def _parse_analysis(self, raw_output: str, image: Image.Image, image_id: str) -> ImageAnalysis:
-        """Parse VLM raw text output into structured ImageAnalysis."""
-        description = ""
-        objects = []
-        object_counts: dict[str, int] = {}
-        annotated_image_path: str | None = None
-        people_count = None
-        relations = []
-        attributes = {}
-
-        lines = raw_output.split("\n")
-        current_section = None
-
-        for line in lines:
-            line = line.strip()
-            if line.upper().startswith("DESCRIPTION:"):
-                current_section = "description"
-                description = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("OBJECTS:"):
-                current_section = "objects"
-                obj_text = line.split(":", 1)[1].strip()
-                objects = [o.strip() for o in obj_text.split(",") if o.strip()]
-            elif line.upper().startswith("PEOPLE_COUNT:") or line.upper().startswith("PERSON_COUNT:"):
-                current_section = "people_count"
-                count_text = line.split(":", 1)[1].strip()
-                try:
-                    people_count = int("".join(ch for ch in count_text if ch.isdigit()))
-                except ValueError:
-                    people_count = None
-            elif line.upper().startswith("RELATIONS:"):
-                current_section = "relations"
-                rel_text = line.split(":", 1)[1].strip()
-                relations = [r.strip() for r in rel_text.split(",") if r.strip()]
-            elif line.upper().startswith("ATTRIBUTES:"):
-                current_section = "attributes"
-                attr_text = line.split(":", 1)[1].strip()
-                attributes["details"] = attr_text
-            elif line.upper().startswith("CONTEXT:"):
-                current_section = "context"
-                attributes["context"] = line.split(":", 1)[1].strip()
-            elif current_section == "description" and line:
-                description += " " + line
-            elif current_section == "objects" and line:
-                objects.extend([o.strip() for o in line.split(",") if o.strip()])
-            elif current_section == "relations" and line:
-                relations.extend([r.strip() for r in line.split(",") if r.strip()])
-
-        # Fallback if parsing didn't yield structured data
-        if not description:
-            description = raw_output[:500]
-        if not objects:
-            objects = self._extract_objects_fallback(raw_output)
-
-        try:
-            detection_result = self.detector.detect_objects(image, image_id)
-            object_counts = detection_result.get("counts", {})
-            annotated_image_path = detection_result.get("annotated_image_path")
-            people_count = int(object_counts.get("person", 0))
+            return self.processor.decode(generated_tokens, skip_special_tokens=True).strip()
         except Exception as exc:
-            logger.warning(f"YOLO detection failed, falling back to VLM count parsing: {exc}")
-            object_counts = {}
-            if people_count is None:
-                people_count = self._infer_people_count(objects, description, raw_output) or 0
+            logger.error("VLM inference failed: %s", exc)
+            return f"Analysis failed: {exc}"
 
-        if not objects and object_counts:
-            objects = list(object_counts.keys())
+    def _parse_analysis(self, raw_output: str, image_id: str, detection_result: dict) -> ImageAnalysis:
+        """Parse VLM output and merge it with detector output."""
+        sections = self._parse_sections(raw_output)
+        description = self._join_lines(sections.get("description", []))
+        visible_people_text = self._join_lines(sections.get("visible_people", []))
+        objects = self._parse_objects_section(sections.get("objects", []))
+        relations = self._parse_list_section(sections.get("relations", []))
+        attributes = self._parse_attributes_section(sections.get("attributes", []))
 
-        # Filter objects for consistency with description (less aggressive)
-        objects = self._filter_inconsistent_objects(objects, description)
+        detector_counts = normalize_object_counts(detection_result.get("counts", {}))
+        detector_objects = list(detector_counts.keys())
+        detected_people_count = detector_counts.get("person")
+
+        people_info = self._extract_people_info(visible_people_text, raw_output)
+        people_count, people_source = self._normalize_people(detected_people_count, people_info, raw_output)
+
+        vlm_objects = [self._normalize_object_label(obj) for obj in objects]
+        merged_objects = self._merge_objects(detector_objects, vlm_objects)
+
+        object_counts = dict(detector_counts)
+        vlm_counts = normalize_object_counts(dict(Counter(vlm_objects)))
+        if not object_counts and vlm_counts:
+            object_counts = vlm_counts
+        else:
+            for label, count in vlm_counts.items():
+                object_counts.setdefault(label, count)
+
+        if not merged_objects and object_counts:
+            merged_objects = list(object_counts.keys())
+        if not merged_objects:
+            merged_objects = self._extract_objects_fallback(raw_output)
+        if not merged_objects and object_counts:
+            merged_objects = list(object_counts.keys())
+
+        if not description:
+            description = raw_output[:500].strip()
+
+        attributes["contains_people"] = bool(people_count and people_count > 0)
+        attributes["human_activity"] = ", ".join(people_info["activities"])
+        if people_info["positions"]:
+            attributes["people_positions"] = people_info["positions"]
+        attributes["people_visibility_uncertain"] = people_info["uncertainty"]
+        attributes["people_count_source"] = people_source
 
         return ImageAnalysis(
             image_id=image_id,
             description=description,
-            objects=objects,
+            objects=merged_objects,
             object_counts=object_counts,
             people_count=people_count,
-            annotated_image_path=annotated_image_path,
+            annotated_image_path=detection_result.get("annotated_image_path"),
             relations=relations,
             attributes=attributes,
-            raw_vlm_output=raw_output
+            raw_vlm_output=raw_output,
         )
+
+    def _parse_sections(self, raw_output: str) -> dict[str, list[str]]:
+        sections = {key: [] for key in SECTION_HEADERS}
+        current_section = None
+
+        for raw_line in raw_output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            matched_section = None
+            matched_text = ""
+            for section_name, pattern in SECTION_HEADERS.items():
+                match = pattern.match(line)
+                if match:
+                    matched_section = section_name
+                    matched_text = match.group(1).strip()
+                    break
+
+            if matched_section:
+                current_section = matched_section
+                if matched_text:
+                    sections[current_section].append(matched_text)
+                continue
+
+            if current_section:
+                sections[current_section].append(line)
+
+        return sections
+
+    @staticmethod
+    def _join_lines(lines: list[str]) -> str:
+        return " ".join(part.strip() for part in lines if part.strip()).strip()
+
+    @staticmethod
+    def _split_items(text: str) -> list[str]:
+        if not text:
+            return []
+        items = []
+        for raw_item in re.split(r"[,;\n]", text):
+            item = raw_item.strip().strip("-*")
+            if item:
+                items.append(item)
+        return items
+
+    def _parse_objects_section(self, lines: list[str]) -> list[str]:
+        text = self._join_lines(lines)
+        objects = self._split_items(text)
+        if objects:
+            return objects
+        return self._extract_objects_fallback(text)
+
+    def _parse_list_section(self, lines: list[str]) -> list[str]:
+        return self._split_items(self._join_lines(lines))
+
+    def _parse_attributes_section(self, lines: list[str]) -> dict:
+        text = self._join_lines(lines)
+        attributes: dict[str, str] = {}
+
+        if not text:
+            return attributes
+
+        attributes["details"] = text
+
+        for line in lines:
+            normalized = line.strip().lstrip("-*").strip()
+            if ":" in normalized:
+                key, value = normalized.split(":", 1)
+                attributes[key.strip().lower().replace(" ", "_")] = value.strip()
+
+        return attributes
+
+    def _merge_objects(self, detector_objects: list[str], vlm_objects: list[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+
+        for label in detector_objects + vlm_objects:
+            normalized = self._normalize_object_label(label)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            merged.append(normalized)
+
+        return merged
+
+    @staticmethod
+    def _normalize_object_label(label: str) -> str:
+        normalized = str(label or "").strip().lower()
+        return "person" if normalized in HUMAN_LABELS else normalized
+
+    def _normalize_people(
+        self,
+        detector_people_count: int | None,
+        people_info: dict,
+        raw_output: str,
+    ) -> tuple[int | None, str]:
+        if detector_people_count is not None:
+            return int(detector_people_count), "detector"
+
+        parsed_count = people_info.get("count")
+        if parsed_count is not None:
+            return int(parsed_count), "vlm_visible_people"
+
+        fallback_count = self._safe_parse_count(raw_output)
+        if fallback_count is not None:
+            return fallback_count, "regex_fallback"
+
+        return 0, "regex_fallback"
+
+    def _extract_people_info(self, visible_people_text: str, raw_output: str) -> dict:
+        combined_text = f"{visible_people_text}\n{raw_output}"
+        info = {
+            "count": None,
+            "positions": "",
+            "activities": [],
+            "uncertainty": False,
+        }
+
+        if visible_people_text:
+            count = self._safe_parse_count(visible_people_text)
+            if count is not None:
+                info["count"] = count
+
+            positions = self._extract_field_value(visible_people_text, "positions")
+            activities = self._extract_field_value(visible_people_text, "activities")
+            if positions:
+                info["positions"] = positions
+            if activities:
+                info["activities"] = self._split_items(activities)
+
+            if re.search(r"\b(uncertain|unclear|hard to tell|cannot tell|partially visible|occluded)\b", visible_people_text, re.IGNORECASE):
+                info["uncertainty"] = True
+
+        if info["count"] is None:
+            info["count"] = self._safe_parse_count(combined_text)
+
+        if not info["activities"]:
+            activity_text = self._extract_field_value(combined_text, "activities")
+            if activity_text:
+                info["activities"] = self._split_items(activity_text)
+
+        if not info["positions"]:
+            positions_text = self._extract_field_value(combined_text, "positions")
+            if positions_text:
+                info["positions"] = positions_text
+
+        if info["count"] is None and PERSON_REGEX.search(combined_text):
+            info["count"] = max(1, len(set(match.group(0).lower() for match in PERSON_REGEX.finditer(combined_text))))
+
+        return info
+
+    @staticmethod
+    def _extract_field_value(text: str, field_name: str) -> str:
+        pattern = re.compile(rf"\b{re.escape(field_name)}\b\s*[:\-]?\s*(.*)$", re.IGNORECASE)
+        values = []
+        for line in text.splitlines():
+            match = pattern.search(line.strip())
+            if match:
+                value = match.group(1).strip().lstrip("-*").strip()
+                if value:
+                    values.append(value)
+        return " ".join(values).strip()
+
+    def _safe_parse_count(self, text: str) -> int | None:
+        if not text:
+            return None
+
+        lowered = text.lower()
+        if any(phrase in lowered for phrase in ("no people", "no person", "nobody", "none visible", "no humans")):
+            return 0
+
+        for pattern in COUNT_PATTERNS:
+            match = pattern.search(text)
+            if not match:
+                continue
+
+            value = match.group(1).lower()
+            if value.isdigit():
+                return int(value)
+            if value in COUNT_WORDS:
+                return COUNT_WORDS[value]
+
+        person_mentions = PERSON_REGEX.findall(text)
+        if person_mentions:
+            return min(max(len(person_mentions), 1), 10)
+
+        return None
 
     @staticmethod
     def _extract_objects_fallback(text: str) -> list[str]:
-        """Improved noun extraction as fallback when VLM doesn't follow format.
-        Focuses ONLY on concrete, tangible objects that can be seen in an image.
-        """
-        # ONLY concrete, tangible objects that can be visually identified
-        concrete_objects = {
-            # People (specific roles)
-            "person", "people", "man", "woman", "boy", "girl", "child", "worker", 
-            "employee", "staff", "customer", "visitor", "pilot", "driver", "rider",
-            
-            # Vehicles & Transportation
-            "car", "truck", "bus", "van", "motorcycle", "bicycle", "train", "plane", 
-            "boat", "ship", "helicopter", "taxi", "ambulance", "firetruck", "police car",
-            "wheel", "tire", "door", "window", "mirror", "seat", "handle", "light",
-            
-            # Buildings & Structures
-            "building", "house", "home", "office", "school", "hospital", "store", "shop",
-            "restaurant", "hotel", "factory", "warehouse", "barn", "shed", "garage",
-            "roof", "wall", "floor", "ceiling", "door", "window", "fence", "gate",
-            "stairs", "staircase", " balcony", "porch", "deck", "patio",
-            "bridge", "tunnel", "road", "street", "highway", "sidewalk", "path",
-            "column", "pillar", "beam", "beam", "foundation", "beam", "pipe", "tube",
-            
-            # Furniture & Fixtures
-            "table", "chair", "desk", "bench", "sofa", "couch", "bed", "mattress",
-            "cabinet", "shelf", "drawer", "closet", "wardrobe", "dresser",
-            "lamp", "light", "ceiling fan", "fan", "vent", "outlet", "switch",
-            "toilet", "sink", "bathtub", "shower", "faucet", "mirror",
-            
-            # Electronics & Equipment
-            "phone", "smartphone", "telephone", "computer", "laptop", "desktop",
-            "monitor", "screen", "tv", "television", "projector", "camera",
-            "keyboard", "mouse", "trackpad", "printer", "scanner", "speaker",
-            "headphones", "microphone", "remote", "battery", "charger", "cable",
-            "wire", "cord", "plug", "jack", "port", "antenna", "satellite",
-            
-            # Kitchen & Food Items
-            "plate", "bowl", "cup", "mug", "glass", "fork", "knife", "spoon",
-            "pot", "pan", "kettle", "oven", "stove", "microwave", "fridge",
-            "refrigerator", "freezer", "dishwasher", "blender", "mixer", "toaster",
-            "bottle", "jar", "container", "package", "wrapper", "bag", "box",
-            "food", "fruit", "vegetable", "bread", "meat", "fish", "egg",
-            
-            # Clothing & Personal Items
-            "shirt", "pants", "trousers", "jeans", "shorts", "skirt", "dress",
-            "jacket", "coat", "sweater", "hoodie", "hat", "cap", "helmet",
-            "shoe", "boot", "sandal", "flipflop", "sock", "glove", "mitten",
-            "belt", "tie", "scarf", "watch", "jewelry", "ring", "necklace",
-            "glasses", "sunglasses", "wallet", "purse", "bag", "backpack",
-            
-            # Sports & Recreation
-            "ball", "bat", "racket", "glove", "helmet", "pad", "uniform",
-            "goal", "hoop", "net", "field", "court", "track", "pool",
-            "bike", "skateboard", "surfboard", "ski", "snowboard",
-            
-            # Nature & Outdoors
-            "tree", "plant", "flower", "grass", "leaf", "branch", "trunk", "root",
-            "rock", "stone", "boulder", "pebble", "mountain", "hill", "valley",
-            "water", "ocean", "sea", "lake", "river", "stream", "pond", "puddle",
-            "wave", "beach", "sand", "soil", "dirt", "mud", "cloud", "sun",
-            "moon", "star", "sky", "horizon", "shadow", "reflection",
-            
-            # Tools & Hardware
-            "hammer", "screwdriver", "wrench", "pliers", "saw", "axe", "knife",
-            "drill", "nail", "screw", "bolt", "nut", "anchor", "hook",
-            "ladder", "stepstool", "scaffold", "wheelbarrow", "shovel",
-            "rake", "hoe", "pickaxe", "shovel", "level", "tape", "ruler",
-            
-            # Signs & Labels
-            "sign", "poster", "banner", "flag", "label", "tag", "sticker",
-            "billboard", "notice", "warning", "instruction", "direction",
-            "text", "letter", "number", "symbol", "logo", "icon", "image",
-            
-            # Containers & Storage
-            "box", "container", "bottle", "jar", "can", "tin", "tube", "bag",
-            "sack", "pouch", "wallet", "purse", "suitcase", "luggage",
-            "basket", "crate", "pallet", "drum", "barrel", "tank", "reservoir",
-            
-            # Common objects that might appear
-            "money", "coin", "bill", "credit card", "id", "badge", "key",
-            "lock", "chain", "rope", "string", "thread", "wire", "cable",
-            "tape", "glue", "adhesive", "clip", "pin", "staple", "clip",
-            "toy", "game", "puzzle", "book", "magazine", "newspaper",
-            "paper", "document", "form", "ticket", "receipt", "label"
-        }
-        
-        text_lower = text.lower()
-        found_objects = []
-        
-        # Check for each concrete object in the text
-        for obj in sorted(concrete_objects, key=len, reverse=True):  # Longer matches first
-            # Use word boundaries to avoid partial matches
-            if re.search(r'\b' + re.escape(obj) + r'\b', text_lower):
-                found_objects.append(obj)
-        
-        # Additional filtering: exclude any remaining abstract/conceptual words
-        abstract_exclude = {
-            # Colors (often mistaken as objects)
-            "red", "blue", "green", "yellow", "orange", "purple", "pink", "brown",
-            "black", "white", "gray", "grey", "silver", "gold", "bronze", "copper",
-            
-            # Sizes/quantities
-            "large", "small", "big", "little", "tiny", "huge", "massive", "enormous",
-            "medium", "average", "normal", "regular", "standard", "full", "empty",
-            "half", "quarter", "part", "section", "portion", "amount", "number",
-            "many", "few", "several", "multiple", "various", "different", "same",
-            "single", "double", "triple", "one", "two", "three", "four", "five",
-            "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "teen",
-            "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty",
-            "ninety", "hundred", "thousand", "million", "billion",
-            
-            # Descriptions/qualities
-            "new", "old", "young", "ancient", "modern", "contemporary", "traditional",
-            "bright", "dark", "dim", "dull", "shiny", "dull", "glossy", "matte",
-            "clear", "cloudy", "foggy", "hazy", "transparent", "opaque", "translucent",
-            "smooth", "rough", "bumpy", "uneven", "flat", "curved", "straight",
-            "round", "square", "rectangular", "circular", "oval", "triangle",
-            "heavy", "light", "weight", "mass", "dense", "sparse", "thick", "thin",
-            "wide", "narrow", "tall", "short", "long", "deep", "shallow", "high",
-            "low", "top", "bottom", "middle", "center", "edge", "side", "end",
-            "hot", "cold", "warm", "cool", "freezing", "boiling", "temperature",
-            "wet", "dry", "damp", "moist", "soaked", "dry", "clean", "dirty",
-            "fresh", "stale", "rotten", "fresh", "clean", "messy", "neat", "tidy",
-            "organized", "disordered", "chaotic", "orderly", "neat", "cluttered",
-            "simple", "complex", "complicated", "basic", "advanced", "elaborate",
-            "beautiful", "ugly", "attractive", "unattractive", "pretty", "handsome",
-            "nice", "good", "bad", "better", "worse", "best", "worst", "fine",
-            "okay", "alright", "right", "wrong", "correct", "incorrect", "true",
-            "false", "real", "fake", "genuine", "authentic", "original", "copy",
-            "natural", "artificial", "synthetic", "manmade", "handmade", "custom",
-            "standard", "special", "unique", "common", "rare", "usual", "unusual",
-            "normal", "abnormal", "typical", "atypical", "regular", "irregular",
-            "frequent", "infrequent", "often", "seldom", "usually", "normally",
-            "always", "never", "sometimes", "occasionally", "periodically",
-            
-            # Actions/states (verbs/adjectives that aren't objects)
-            "working", "moving", "standing", "sitting", "lying", "walking", "running",
-            "jumping", "flying", "driving", "riding", "carrying", "holding", "pushing",
-            "pulling", "lifting", "dropping", "throwing", "catching", "kicking",
-            "hitting", "striking", "breaking", "fixing", "repairing", "building",
-            "constructing", "destroying", "opening", "closing", "entering", "exiting",
-            "appearing", "disappearing", "visible", "invisible", "hidden", "shown",
-            "displayed", "present", "absent", "missing", "lost", "found", "located",
-            "positioned", "placed", "located", "situated", "positioned", "oriented",
-            "facing", "pointed", "aimed", "directed", "oriented", "aligned",
-            "straight", "crooked", "bent", "curved", "angled", "tilted", "leaned",
-            "vertical", "horizontal", "diagonal", "parallel", "perpendicular",
-            "active", "inactive", "on", "off", "open", "closed", "started", "stopped",
-            "begun", "finished", "completed", "running", "stopped", "halted", "paused",
-            "waiting", "resting", "sleeping", "awake", "alert", "tired", "exhausted",
-            "busy", "idle", "free", "occupied", "available", "unavailable", "accessible",
-            "inaccessible", "reachable", "unreachable", "near", "far", "close", "distant",
-            "nearby", "far away", "in front", "behind", "above", "below", "over", "under",
-            "inside", "outside", "indoors", "outdoors", "interior", "exterior",
-            "internal", "external", "center", "middle", "core", "edge", "border",
-            "boundary", "limit", "extent", "range", "area", "space", "volume", "capacity",
-            
-            # Concepts/ideas
-            "time", "date", "hour", "minute", "second", "moment", "instant", "period",
-            "duration", "age", "era", "age", "epoch", "generation", "century", "decade",
-            "year", "month", "week", "day", "holiday", "weekend", "morning", "afternoon",
-            "evening", "night", "dawn", "dusk", "sunrise", "sunset", "twilight",
-            "light", "darkness", "shadow", "shine", "glow", "illumination", "brightness",
-            "sound", "noise", "voice", "speech", "talk", "conversation", "dialogue",
-            "music", "song", "melody", "rhythm", "beat", "tune", "noise", "silence",
-            "temperature", "heat", "cold", "warmth", "coolness", "pressure", "weight",
-            "force", "energy", "power", "electricity", "magnetism", "gravity", "friction",
-            "speed", "velocity", "acceleration", "motion", "movement", "direction",
-            "way", "path", "route", "course", "track", "trail", "line", "street", "road",
-            "avenue", "boulevard", "drive", "lane", "alley", "path", "trail", "way",
-            "idea", "thought", "concept", "theory", "belief", "faith", "trust", "hope",
-            "dream", "vision", "goal", "objective", "target", "purpose", "reason", "cause",
-            "effect", "result", "outcome", "consequence", "impact", "influence", "effect",
-            "change", "difference", "variation", "alternative", "option", "choice", "decision",
-            "plan", "strategy", "method", "approach", "technique", "process", "procedure",
-            "step", "stage", "phase", "level", "grade", "rank", "score", "rating", "evaluation",
-            "assessment", "analysis", "examination", "inspection", "review", "survey",
-            "study", "research", "investigation", "exploration", "discovery", "invention",
-            "creation", "production", "manufacture", "construction", "building", "development",
-            "growth", "expansion", "extension", "addition", "subtraction", "multiplication",
-            "division", "fraction", "percentage", "ratio", "proportion", "rate", "speed",
-            "distance", "length", "width", "height", "depth", "size", "dimension", "measure",
-            "unit", "scale", "range", "spectrum", "scale", "gauge", "meter", "liter", "gram",
-            "kilogram", "pound", "ounce", "ton", "mile", "kilometer", "meter", "centimeter",
-            "millimeter", "microgram", "microsecond", "nanosecond",
-            
-            # Articles/prepositions/conjunctions (should already be caught by word boundaries but just in case)
-            "the", "a", "an", "and", "or", "but", "nor", "for", "yet", "so", "although",
-            "because", "since", "unless", "while", "whereas", "whether", "either", "neither",
-            "both", "not", "only", "also", "just", "even", "still", "already", "yet",
-            "always", "never", "sometimes", "often", "frequently", "generally", "usually",
-            "normally", "typically", "occasionally", "seldom", "rarely", "in", "on", "at",
-            "to", "for", "of", "with", "by", "from", "up", "down", "in", "out", "on", "off",
-            "over", "under", "above", "below", "top", "bottom", "front", "back", "inside",
-            "outside", "between", "among", "through", "across", "around", "past", "beyond",
-            "within", "without", "against", "along", "among", "around", "before", "after",
-            "during", "throughout", "i", "you", "he", "she", "it", "we", "they", "me",
-            "him", "her", "us", "them", "my", "your", "his", "her", "its", "our", "their",
-            "mine", "yours", "his", "hers", "its", "ours", "theirs", "this", "that", "these",
-            "those", "which", "who", "whom", "whose", "what", "where", "when", "why", "how"
-        }
-        
-        # Final filter: remove any abstract words that might have slipped through
-        filtered_objects = []
-        for obj in found_objects:
-            if obj not in abstract_exclude and len(obj) >= 2:
-                # Additional sanity check: if it's mostly alphabetic and not a common false positive
-                if obj.isalpha() and not obj in {
-                    "image", "pic", "photo", "picture", "scene", "view", "sight", "look",
-                    "appearance", "looks", "seems", "appears", "like", "as", "than",
-                    "very", "quite", "rather", "somewhat", "pretty", "fairly", "kind",
-                    "sort", "type", "kind", "form", "shape", "size", "color", "colour"
-                }:
-                    filtered_objects.append(obj)
-        
-        return list(set(filtered_objects))  # Remove duplicates
+        """Fast fallback extractor for malformed VLM output."""
+        found: list[str] = []
+        seen: set[str] = set()
 
-    @staticmethod
-    def _filter_inconsistent_objects(objects: list[str], description: str) -> list[str]:
-        """Filter objects that are inconsistent with the description.
-        Less aggressive filtering to prevent losing valid detections.
-        """
-        if not description or not objects:
-            return objects
+        for match in OBJECT_EXTRACTION_PATTERN.finditer(text.lower()):
+            label = match.group(0).strip().lower()
+            if label in seen:
+                continue
+            seen.add(label)
+            found.append(label)
 
-        description_lower = description.lower()
-        filtered = []
+        return found
 
-        # Objects that are often hallucinated and shouldn't appear without being in description
-        high_hallucination_risk = {
-            "lion", "tiger", "bear", "monkey", "elephant", "giraffe", "zebra"  # Reduced set
-        }
-
-        for obj in objects:
-            obj_lower = obj.lower()
-            # If it's a risky object, only keep if mentioned in description
-            if any(risky in obj_lower for risky in high_hallucination_risk):
-                if obj_lower in description_lower:
-                    filtered.append(obj)
-                # Still include if it's a general category that might be implied
-                elif any(general in obj_lower for general in ["animal", "creature", "beast"]):
-                    if any(general in description_lower for general in ["animal", "creature", "beast"]):
-                        filtered.append(obj)
-                # Otherwise, tentatively include it but log for review
-                else:
-                    filtered.append(obj)  # Include it rather than dropping it
-            else:
-                # Keep non-animal/objects
-                filtered.append(obj)
-
-        return filtered
-
-    @staticmethod
-    def _infer_people_count(objects: list[str], description: str, raw_output: str) -> int | None:
-        """Best-effort fallback for people count when the model omits it."""
-        combined_text = f"{description}\n{raw_output}".lower()
-
-        if "no people" in combined_text or "no person" in combined_text or "nobody" in combined_text:
-            return 0
-
-        import re
-
-        count_patterns = [
-            r"(?:people|persons|person|workers|men|women|boys|girls|children)\s*(?:of|:)?\s*(\d+)",
-            r"(\d+)\s*(?:people|persons|person|workers|men|women|boys|girls|children)",
-            r"\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:people|persons|persons|people)\b",
-        ]
-        
-        word_to_num = {
-            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10
-        }
-
-        for pattern in count_patterns:
-            match = re.search(pattern, combined_text)
-            if match:
-                try:
-                    # Check if it's a word number
-                    if match.group(1).isalpha() and match.group(1) in word_to_num:
-                        return word_to_num[match.group(1)]
-                    else:
-                        return int(match.group(1))
-                except ValueError:
-                    continue
-
-        # Count explicit mentions
-        people_mentions = len(re.findall(r'\bpeople\b', combined_text))
-        person_mentions = len(re.findall(r'\bperson\b', combined_text))
-        if people_mentions > 0 or person_mentions > 0:
-            # Rough estimate: if they mention people multiple times, there are likely multiple people
-            total_mentions = people_mentions + person_mentions
-            if total_mentions > 2:
-                return min(total_mentions, 5)  # Cap reasonable estimate
-            elif total_mentions > 0:
-                return 1
-
-        return None
 
 @lru_cache()
 def get_vlm_service() -> VLMService:
