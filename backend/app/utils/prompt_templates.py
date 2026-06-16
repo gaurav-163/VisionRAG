@@ -5,27 +5,24 @@ Prompt templates — centralized to avoid duplication across services.
 
 def image_analysis_prompt() -> str:
     return (
-        "Analyze this image with extreme accuracy and precision. Provide:\n"
-        "1. A comprehensive description of the scene\n"
-        "2. List ONLY objects you can clearly see and identify (strict accuracy required)\n"
-        "3. Count the number of visible people if any are present\n"
-        "4. Relationships between important objects or regions\n"
-        "5. Notable attributes (colors, positions, actions, text, emotions)\n"
-        "6. Any contextual information (setting, time of day, weather, etc.)\n\n"
-        "CRITICAL ACCURACY REQUIREMENTS:\n"
-        "- ONLY include objects that are VISUALLY PRESENT in the image\n"
-        "- Do NOT include animals, pets, or living creatures UNLESS they are clearly visible\n"
-        "- Do NOT guess or assume objects based on context\n"
-        "- If you cannot clearly see an object, DO NOT list it\n"
-        "- Consistency check: all listed objects must be mentioned in or directly relate to the description\n"
-        "- Be specific and concrete: describe exactly what you see, not what might be there\n\n"
-        "Format your response as:\n"
-        "DESCRIPTION: <detailed description>\n"
-        "OBJECTS: <comma-separated list of objects>\n"
-        "PEOPLE_COUNT: <number of visible people, or 0 if none>\n"
-        "RELATIONS: <comma-separated list of object relationships>\n"
-        "ATTRIBUTES: <key details about the scene>\n"
-        "CONTEXT: <contextual information>"
+        "Analyze this image and return STRICTLY in this format:\n\n"
+        "DESCRIPTION:\n"
+        "Concise scene summary.\n\n"
+        "VISIBLE_PEOPLE:\n"
+        "- total count\n"
+        "- positions\n"
+        "- activities\n\n"
+        "OBJECTS:\n"
+        "Comma-separated visible physical objects only.\n\n"
+        "RELATIONS:\n"
+        "Relationships between objects.\n\n"
+        "ATTRIBUTES:\n"
+        "Important visual attributes.\n\n"
+        "RULES:\n"
+        "- Do NOT hallucinate objects\n"
+        "- Do NOT guess hidden people\n"
+        "- Count ONLY clearly visible humans\n"
+        "- Mention uncertainty if visibility is poor"
     )
 
 
@@ -62,11 +59,19 @@ def build_image_context(analyses: list[dict]) -> str:
     parts = []
 
     for analysis in analyses:
+        object_counts = analysis.get("object_counts", {})
+        if object_counts:
+            counts_text = ", ".join(f"{name}: {count}" for name, count in object_counts.items())
+        else:
+            counts_text = "none"
+
         parts.append(
             f"[Image {analysis['image_id']}]\n"
             f"File: {analysis.get('filename', 'unknown')}\n"
             f"Description: {analysis['description']}\n"
             f"Objects: {', '.join(analysis.get('objects', []))}\n"
+            f"Object Counts: {counts_text}\n"
+            f"People Count: {analysis.get('people_count', 'unknown')}\n"
             f"Relations: {', '.join(analysis.get('relations', []))}\n"
             f"Attributes: {analysis.get('attributes', {})}\n"
         )

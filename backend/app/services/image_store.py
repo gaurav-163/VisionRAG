@@ -62,6 +62,9 @@ class ImageStore:
             height=image.height,
             description=analysis.description,
             objects=analysis.objects,
+            object_counts=analysis.object_counts,
+            people_count=analysis.people_count if analysis.people_count is not None else 0,
+            annotated_image_path=analysis.annotated_image_path,
             relations=analysis.relations,
             attributes=analysis.attributes
         )
@@ -81,6 +84,9 @@ class ImageStore:
                 "filepath": filepath,
                 "description": analysis.description,
                 "objects": json.dumps(analysis.objects),
+                "object_counts": json.dumps(analysis.object_counts),
+                "people_count": analysis.people_count if analysis.people_count is not None else 0,
+                "annotated_image_path": analysis.annotated_image_path or "",
                 "relations": json.dumps(analysis.relations),
                 "attributes": json.dumps(analysis.attributes),
                 "session_id": session_id,
@@ -104,6 +110,9 @@ class ImageStore:
             upload_time=datetime.fromisoformat(meta["upload_time"]) if meta.get("upload_time") else datetime.utcnow(),
             description=meta.get("description", ""),
             objects=json.loads(meta.get("objects", "[]")),
+            object_counts=json.loads(meta.get("object_counts", "{}")),
+            people_count=meta.get("people_count"),
+            annotated_image_path=meta.get("annotated_image_path") or None,
             relations=json.loads(meta.get("relations", "[]")),
             attributes=json.loads(meta.get("attributes", "{}")),
         )
@@ -196,6 +205,9 @@ class ImageStore:
                     "filename": meta.get("filename", ""),
                     "description": meta.get("description", ""),
                     "objects": json.loads(meta.get("objects", "[]")),
+                    "object_counts": json.loads(meta.get("object_counts", "{}")),
+                    "people_count": meta.get("people_count"),
+                    "annotated_image_path": meta.get("annotated_image_path") or None,
                     "relations": json.loads(meta.get("relations", "[]")),
                     "attributes": json.loads(meta.get("attributes", "{}")),
                     "distance": results["distances"][0][i] if results["distances"] else 0
